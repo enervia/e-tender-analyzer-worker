@@ -15,7 +15,7 @@ BASE_URL = "https://etender.gov.az/main/competition/products/{page_id}"
 
 
 def clean(value: str | None) -> str:
-    return re.sub(r"\\s+", " ", value or "").strip()
+    return re.sub(r"\s+", " ", value or "").strip()
 
 
 async def scrape_page(page_id: int) -> dict[str, Any]:
