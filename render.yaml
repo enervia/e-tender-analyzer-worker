@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: e-tender-analyzer-worker
+    runtime: docker
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: WORKER_API_KEY
+        sync: false
+      - key: MAX_SCAN_PAGES
+        value: "100"
