@@ -9,7 +9,7 @@ from supabase import create_client, Client
 from app.config import settings
 from app.scraper import scrape_page
 
-app = FastAPI(title="e-Tender Analyzer Worker", version="0.1.0")
+app = FastAPI(title="e-Tender Analyzer Worker", version="0.1.1")
 _lock = asyncio.Lock()
 _job: dict[str, Any] = {
     "status": "idle", "start_id": None, "end_id": None, "current_id": None,
@@ -26,7 +26,11 @@ def require_key(x_api_key: str | None = Header(default=None)) -> None:
 def get_supabase() -> Client:
     if not settings.supabase_url or not settings.supabase_service_role_key:
         raise HTTPException(status_code=503, detail="Supabase server credentials are not configured")
-    return create_client(settings.supabase_url, settings.supabase_service_role_key)
+    # Accept either the project URL or the Data API URL pasted from Supabase.
+    url = settings.supabase_url.strip().rstrip("/")
+    if url.endswith("/rest/v1"):
+        url = url[:-len("/rest/v1")]
+    return create_client(url, settings.supabase_service_role_key)
 
 class ScanRequest(BaseModel):
     start_id: int = Field(ge=1)
@@ -55,12 +59,16 @@ async def persist_page(data: dict[str, Any]) -> int:
             row = dict(product)
             row["row_key"] = f'{page_id}:{row.get("row_no", 0)}'
             payload.append(row)
-        client.table("etender_products").upsert(payload, on_conflict="row_key").execute()
+        await asyncio.to_thread(
+            lambda: client.table("etender_products").upsert(payload, on_conflict="row_key").execute()
+        )
     check = {
         "page_id": page_id, "checked_at": data["collected_at"],
         "status": data["page_status"], "details": data.get("details"),
     }
-    client.table("etender_page_checks").upsert(check, on_conflict="page_id").execute()
+    await asyncio.to_thread(
+        lambda: client.table("etender_page_checks").upsert(check, on_conflict="page_id").execute()
+    )
     return len(products)
 
 async def run_scan(start_id: int, end_id: int, delay: float):
@@ -73,10 +81,11 @@ async def run_scan(start_id: int, end_id: int, delay: float):
             _job["current_id"] = page_id
             try:
                 data = await scrape_page(page_id)
-                saved = await asyncio.to_thread(lambda d=data: persist_page(d))
+                saved = await persist_page(data)
                 _job["products_saved"] += saved
                 if data["page_status"] not in ("ok", "empty_or_unrecognized"):
                     _job["errors"] += 1
+                    _job["message"] = f"Page {page_id}: {data.get('details') or data['page_status']}"
             except Exception as exc:
                 _job["errors"] += 1
                 _job["message"] = f"Page {page_id}: {str(exc)[:250]}"
@@ -90,7 +99,7 @@ async def run_scan(start_id: int, end_id: int, delay: float):
             _job["status"] = "completed"
         _job["finished_at"] = datetime.now(timezone.utc).isoformat()
         _job["current_id"] = None
-        if _job["status"] == "completed":
+        if _job["status"] == "completed" and _job["errors"] == 0:
             _job["message"] = "Scan finished"
 
 @app.post("/scan/start", dependencies=[Depends(require_key)])
@@ -112,6 +121,4 @@ async def start_scan(request: ScanRequest):
 
 @app.post("/scan/stop", dependencies=[Depends(require_key)])
 async def stop_scan():
-    # Cooperative stop flag is checked by a dedicated route in the next worker iteration.
-    # Currently running scans are allowed to finish the requested bounded range.
     return {"accepted": False, "message": "Immediate stop is not enabled in this initial version; use small bounded ranges."}
