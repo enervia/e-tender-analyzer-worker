@@ -6,6 +6,9 @@ authentication, CAPTCHA, rate limits, or access controls.
 from __future__ import annotations
 
 import re
+import asyncio
+import urllib.error
+import urllib.request
 from datetime import datetime, timezone
 from typing import Any
 
@@ -18,7 +21,43 @@ BODY_TIMEOUT_MS = 8_000
 
 
 def clean(value: str | None) -> str:
-    return re.sub(r"\s+", " ", value or "").strip()
+    return re.sub(r"\\s+", " ", value or "").strip()
+
+
+def _http_probe(url: str) -> dict[str, Any]:
+    """Independent standard-library HTTP check; does not evade access controls."""
+    request = urllib.request.Request(
+        url,
+        headers={"User-Agent": "Mozilla/5.0 (compatible; eTenderAnalyzer/1.0)"},
+        method="GET",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=12) as response:
+            sample = response.read(4096).decode("utf-8", errors="replace")
+            return {
+                "ok": True,
+                "status": response.status,
+                "final_url": response.geturl(),
+                "content_type": response.headers.get("Content-Type"),
+                "sample": clean(sample)[:500],
+            }
+    except urllib.error.HTTPError as exc:
+        try:
+            sample = exc.read(2048).decode("utf-8", errors="replace")
+        except Exception:
+            sample = ""
+        return {
+            "ok": False,
+            "status": exc.code,
+            "final_url": exc.geturl(),
+            "error": f"HTTPError: {exc.code} {exc.reason}",
+            "sample": clean(sample)[:300],
+        }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "error": f"{type(exc).__name__}: {str(exc)[:300]}",
+        }
 
 
 async def scrape_page(page_id: int) -> dict[str, Any]:
@@ -34,6 +73,10 @@ async def scrape_page(page_id: int) -> dict[str, Any]:
         "page_title": None,
         "products": [],
     }
+
+    # Compare a plain HTTP request with Chromium from the same Render instance.
+    http_probe = await asyncio.to_thread(_http_probe, url)
+    result["http_probe"] = http_probe
 
     async with async_playwright() as p:
         browser = await p.chromium.launch()
@@ -62,8 +105,9 @@ async def scrape_page(page_id: int) -> dict[str, Any]:
                 result.update(
                     page_status="navigation_timeout",
                     details=(
-                        f"No navigation response/commit within "
-                        f"{NAVIGATION_TIMEOUT_MS // 1000}s."
+                        f"Playwright received no navigation response/commit within "
+                        f"{NAVIGATION_TIMEOUT_MS // 1000}s. "
+                        f"Independent HTTP probe: {http_probe!r}"
                     ),
                 )
                 return result
