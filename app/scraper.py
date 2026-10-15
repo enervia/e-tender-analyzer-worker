@@ -21,7 +21,7 @@ BODY_TIMEOUT_MS = 8_000
 
 
 def clean(value: str | None) -> str:
-    return re.sub(r"\\s+", " ", value or "").strip()
+    return re.sub(r"\s+", " ", value or "").strip()
 
 
 def _http_probe(url: str) -> dict[str, Any]:
